@@ -1,20 +1,31 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <esp_sleep.h>
+#include "esp_sntp.h"
+#include "time.h"
+#include "EspNowLowPower.hpp"
+
+
+//Wifi needed for NTP time sync, input SSID and password below
+const char WIFI_SSID[] = "Network name";
+const char WIFI_PASS[] = "Password";
+
 
 // --- SETTINGS ---
 // Replace with the MAC of the DESTINATION board
-uint8_t peerAddress[] = {0xE8,0x3D,0xC1,0x9D,0x9A,0xA0}; 
+uint8_t slaveAddress[] = {0xE8,0x3D,0xC1,0x9D,0x9A,0xA0};
+
 
 // Structure must match on both boards
 typedef struct struct_message {
-    char payload[240]; // Buffer for your text
+    char payload[128];
 } struct_message;
 
 struct_message outgoingData;
 struct_message incomingData;
 
-
 bool msgsent = false;
+
 // --- CALLBACKS ---
 
 // When data arrives via radio
@@ -37,9 +48,13 @@ void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 
 void setup() {
     Serial.begin(115200);
+    /***************************SETTING UP TIMER VIA WIFI - NTP***************************************/
+    while(!masterSetupNTP(WIFI_SSID,WIFI_PASS)){
+        Serial.println("Error: Syncing time with NTP failed. WIFI or NTP server issue.");
+        delay(5000);
+    }
 
-    WiFi.mode(WIFI_STA);
-
+    /**************************************INITIALIZE ESP NOW****************************************/
     if (esp_now_init() != ESP_OK) {
         Serial.println("ESP-NOW Init Failed");
         return;
@@ -47,10 +62,10 @@ void setup() {
 
     esp_now_register_send_cb(OnDataSent);
     esp_now_register_recv_cb(OnDataRecv);
-
-    // Register the other board
+    
+    /****************************REGISTERING SLAVE BOARD*********************************************/
     esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, peerAddress, 6);
+    memcpy(peerInfo.peer_addr, slaveAddress, 6);
     peerInfo.channel = 0;  
     peerInfo.encrypt = false;
     
@@ -59,7 +74,9 @@ void setup() {
         return;
     }
 
-    Serial.println("Bridge Ready. Type something in Serial Monitor!");
+    /***************************TIME SYNC WIHT SLAVE**************************************************/
+    snprintf(outgoingData.payload, sizeof(outgoingData.payload), "TIMESYNC %lld", (long long)getTime());
+    esp_now_send(slaveAddress, (uint8_t *) &outgoingData, sizeof(outgoingData));
 }
 
 void loop() {
@@ -74,9 +91,10 @@ void loop() {
 
         // We subtract 5 from the max size to leave room for the 4-char prefix + null terminator
         int bytesRead = Serial.readBytesUntil('\n', &outgoingData.payload[4], sizeof(outgoingData.payload) - 5);
+        outgoingData.payload[4 + bytesRead] = '\0';
 
         // Send over the air
-        esp_now_send(peerAddress, (uint8_t *) &outgoingData, sizeof(outgoingData));
+        esp_now_send(slaveAddress, (uint8_t *) &outgoingData, sizeof(outgoingData));
         
         Serial.println(outgoingData.payload);
     }
